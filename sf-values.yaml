@@ -1,0 +1,129 @@
+# OpenShift override values for kagent
+# Addresses:
+#   1. SCC: remove pinned UIDs from grafana-mcp and querydoc so OpenShift assigns a valid UID
+#      (postgres still needs the nonroot-v2 SCC grant via oc adm policy)
+#   2. CPU: disable non-essential workloads to fit on a small single-node cluster
+
+# ==============================================================================
+# PROVIDER CONFIGURATION (Groq Cloud, OpenAI-compatible)
+# ==============================================================================
+
+providers:
+  default: openAI
+  openAI:
+    provider: OpenAI
+    model: "llama-3.1-8b-instant"        # replace with your exact Groq model ID
+    apiKeySecretRef: kagent-openai
+    apiKeySecretKey: OPENAI_API_KEY
+    config:
+      baseUrl: "https://api.groq.com/openai/v1"
+
+# ==============================================================================
+# REDUCE CORE COMPONENT CPU REQUESTS
+# ==============================================================================
+
+controller:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 2
+      memory: 512Mi
+
+ui:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+database:
+  postgres:
+    bundled:
+      resources:
+        requests:
+          cpu: 50m
+          memory: 128Mi
+        limits:
+          cpu: 500m
+          memory: 512Mi
+
+# ==============================================================================
+# GRAFANA-MCP: drop pinned UID so OpenShift assigns one
+# ==============================================================================
+
+grafana-mcp:
+  enabled: false  # set to true if you need it, but disable for now to save CPU
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+    readOnlyRootFilesystem: true
+    # runAsUser/runAsGroup intentionally removed
+
+# ==============================================================================
+# QUERYDOC: drop pinned UID so OpenShift assigns one
+# ==============================================================================
+
+querydoc:
+  enabled: false  # set to true if you need it, but disable for now to save CPU
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+    readOnlyRootFilesystem: true
+    # runAsUser/runAsGroup intentionally removed
+
+# ==============================================================================
+# DISABLE NON-ESSENTIAL AGENTS (re-enable one by one as needed)
+# ==============================================================================
+
+istio-agent:
+  enabled: true
+  resources:
+    requests:
+      cpu: 20m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+
+kgateway-agent:
+  enabled: false
+
+argo-rollouts-agent:
+  enabled: true
+  resources:
+    requests:
+      cpu: 20m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+
+cilium-policy-agent:
+  enabled: false
+
+cilium-manager-agent:
+  enabled: false
+
+cilium-debug-agent:
+  enabled: false
+
+observability-agent:
+  enabled: false
+
+promql-agent:
+  enabled: false
+
+helm-agent:
+  enabled: true
+  resources:
+    requests:
+      cpu: 20m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
