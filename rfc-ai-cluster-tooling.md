@@ -15,7 +15,17 @@
 
 ## Motivation
 
-The goal is AI assistance for Kubernetes/OpenShift operations — diagnosing issues, answering "why is this broken", and ideally remediating. This RFC surveys four candidates, then evaluates **kagent** in depth because it is the only option that crosses into autonomous *write* territory — which is both its value and its risk.
+When a pod goes down, a DE faces three compounding problems:
+
+1. **Impact and error correlation** — understanding the blast radius requires manually trawling logs, events, and related resources across the cluster. By the time a DE has a full picture, significant time has already been lost.
+
+2. **Hotfixes over root causes** — under pressure, DEs often reach for the fastest fix (restart the pod, bump a resource limit) without identifying *why* the error appeared. The underlying cause persists and the incident recurs.
+
+3. **Inconsistent diagnostic quality** — the DE changes daily. An inexperienced DE may miss a subtle misconfiguration that a senior would catch immediately. Diagnostic quality today depends on who happens to be on shift.
+
+The goal is a solution that addresses all three: surfacing impact and correlated errors in parallel, digging past symptoms to the true root cause, and providing consistent senior-level diagnosis regardless of who is responding.
+
+This RFC surveys four candidates, then evaluates **kagent** in depth as the only option capable of acting on findings — which is both its value and its risk.
 
 ### Scope
 
@@ -34,18 +44,34 @@ The goal is AI assistance for Kubernetes/OpenShift operations — diagnosing iss
 
 | Dimension | K8sGPT (CLI) | Kubectl-ai (CLI) | OpenShift Lightspeed | Kagent |
 |---|---|---|---|---|
-| **Type** | AI Scanner | AI Assistant | AI Assistant | AI Agent (read + write) |
-| **How it works** | Deterministic analyzers scan cluster/namespace for issues → parse findings to LLM → LLM explains findings | Natural language → kubectl command. Retains conversation context within a session. | Conversational chat in OCP console | Custom agents run as K8s CRDs; LLM decides actions (can make use of mcp tools as well)|
+| **Type** | AI Scanner | AI Assistant | AI Assistant | AI Agent |
+| **How it works** | Deterministic analyzers scan cluster/namespace for issues → parse findings to LLM → LLM explains findings | Natural language → kubectl command. Retains conversation context within a session. | Conversational chat in OCP console | Custom agents created by CRDs; LLM decides actions (can make use of mcp tools as well)|
 | **Unique features** | There is an operator but little stars | Context-aware | Context-aware | A2A multi-agent orchestration |
-| **Tool integrations (where can it pull data from)** | Kube API | Kube API via kubectl | OCP console, OCP API | Via MCP tools. A generic k8s tool reaches any resource on the Kube API — including CRDs like Istio/Argo — bounded by RBAC.<br><br>Domain MCP tools (istio, argo) add specialised ops (e.g. `istioctl analyze`) beyond plain CRD CRUD |
+| **Tool integrations (where can it pull data from)** | Kube API | Kube API via kubectl | OCP console, OCP API | Via MCP tools. All other tools are limited to the Kube API — they can read CRD specs (e.g. `AuthorizationPolicy`, `Rollout`) but only see **declared config**.<br><br>Kagent's domain MCP tools (Istio, Argo) also invoke the actual CLIs (`istioctl`, `argocd`), exposing **live runtime state**: Envoy proxy sync status, mesh config validation, GitOps drift and rollout history |
 | **Blast radius** | Nil — doesn't write to cluster | Can generate and execute write kubectl commands | Nil — doesn't write to cluster | Configurable — write-capable; can have guardrail (RBAC scoping per agent) |
 | **Auditability** | None | K8s API request will appear in K8s audit log under the user we oc log in as | Tied to OCP user identity; questions asked are not logged | can implement built-in tracing of every agent action (OTEL) |
 
-1. **[K8sGPT](https://github.com/k8sgpt-ai/k8sgpt)** — a diagnostic scanner. Deterministic analyzers find problems; the LLM only explains them. Read-only, zero blast radius, but also no action and no memory.
+1. **[K8sGPT](https://github.com/k8sgpt-ai/k8sgpt)**
 
-2. **[Kubectl-ai](https://github.com/GoogleCloudPlatform/kubectl-ai)** — a natural-language-to-kubectl translator running on a human's workstation. It executes under *your* kubeconfig, so writes are possible and land in the audit log under your identity. Powerful but unscoped — it inherits whatever you can do.
+   > **K8sGPT is a scanner, not an AI assistant.** Run `k8sgpt analyze` to scan, then `k8sgpt analyze --explain` to have the LLM explain the findings.
 
-3. **OpenShift Lightspeed** — a read-only chat assistant embedded in the OCP console. Convenient and tied to OCP identity, but OpenShift-only, can't act, and doesn't log the questions asked.
+   <img src="images/k8sgpt.png" width="600"/>
+
+   *Example output: the analyzer detects an `ImagePullBackOff` and the LLM produces a single plain-English sentence at the bottom *
+
+2. **[Kubectl-ai](https://github.com/GoogleCloudPlatform/kubectl-ai)**
+
+   Start a session with:
+
+   ```bash
+   kubectl-ai --llm-provider=openai --model=openrouter/auto
+   ```
+
+   <img src="images/kubectl-ai.png" width="600"/>
+
+   *kubectl-ai traces the `ImagePullBackOff` back to the bad image tag in the Deployment spec, proposes fix commands, asks for approval, then executes if given permission*
+
+3. **OpenShift Lightspeed** — a read-only chat assistant embedded in the OCP console. Convenient and tied to OCP identity, but OpenShift-only & can't act
 
 4. **[Kagent](https://github.com/kagent-dev/kagent)** — the only true *agent*: it can take actions, not just suggest them. The rest of this RFC focuses here.
 
@@ -135,9 +161,6 @@ A fixed-schema JSON handoff — not free text — so the Secondary Agent receive
 
 ## Open questions
 
-1. Should the PoC stay read-only (diagnosis only), or also cover write actions (e.g. pod restart)? Read-only is lower risk and faster to validate; including writes proves the full remediation loop but pulls the approval-gate and blast-radius work into the PoC.
-2. Do we require human-in-the-loop approval before agent writes? If so, build/adopt an approval MCP tool, or restrict agents to read-only and pair with kubectl-ai for vetted writes?
-2. Can we automate the kagent-OTEL ↔ K8s-audit correlation into a single queryable trail (e.g. inject session/user id as a trace attribute that also lands in audit annotations)?
-3. Target topology: one broadly-scoped agent, or many narrowly-scoped per-namespace/per-domain agents (smaller blast radius, more to manage)?
-4. Where do read-only tools (K8sGPT / Lightspeed) sit alongside kagent — feeders/diagnostics vs. the action layer?
+1. Should the PoC stay read-only (diagnosis only), or also cover write actions (e.g. pod restart)? 
+
 
