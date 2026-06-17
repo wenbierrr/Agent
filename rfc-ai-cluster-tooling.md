@@ -86,13 +86,23 @@ Kagent is not committed as the production solution yet. It is alpha and unproven
 - Provides DEs a working natural-language-to-kubectl assistant immediately, with no new platform overhead
 
 
-**Track 2 — kagent PoC (~ 6-7 weeks)**
-- Build a minimal **Primary + Secondary** agent targeting **one** failure type to start — **CrashLoopBackOff only** as POC
-- The goal is validation, not coverage: confirm kagent's **A2A orchestration works in the OpenShift environment**, and stress-test the six concerns ([Part 2](#part-2--key-agent-concerns)) against a real deployment.
-- Runs **read-only** (diagnosis only) — though whether the PoC should also cover write actions is an [open question](#open-questions).
+**Track 2 — kagent diagnostic PoC (~ 6-7 weeks)**
+- Build a **Primary + Secondary** agent targeting **one** failure type — **CrashLoopBackOff** as the starting point.
+- The agent is **read-only** and produces two outputs for the DE: (a) a root-cause finding with cited cluster evidence, and (b) a suggested fix. It does **not** apply the fix. Whether write/remediation is in scope is [open question 2](#open-questions).
+- The goal is **quality, not coverage** — for the one failure type chosen, the agent's root cause and suggested fix should match what a senior DE would produce. Confirming kagent's A2A orchestration runs on OpenShift is necessary but not sufficient.
 - Architecture in [Part 1](#part-1--proposed-architecture-primary--secondary-agent-pattern).
 
-**Decision point** — after both tracks, the question is whether kagent's multi-agent model delivers enough over kubectl-ai to justify operating it. Only then is there a decision to invest in kagent as the strategic, write-capable platform.
+**What "good" means for the diagnostic agent** (success criteria for Track 2)
+
+| Criterion | Definition |
+|---|---|
+| *Accuracy* | Root cause matches a senior DE's call on a labelled set of past CrashLoopBackOff incidents. |
+| *Impact correlation* | Surfaces related resources and downstream affected services, not just the failing pod (addresses [motivation #1](#motivation)). |
+| *Evidence* | Every claim cites the specific log line, event, or CRD field that supports it. |
+| *Calibration* | When evidence is insufficient, the agent says so and asks for input rather than guessing (addresses [motivation #3](#motivation)). |
+| *Suggested fix* | Specific (exact command or YAML change), tied to the cited root cause — addresses the cause, not the symptom (addresses [motivation #2](#motivation)). |
+
+**Decision point** — after both tracks, the question is whether kagent's **diagnostic depth** (multi-agent reasoning + live runtime state via Istio/Argo MCP tools) delivers enough over kubectl-ai to justify operating it. Write capability is a possible future extension, not the immediate value driver.
 
 ### Kagent: Agent Architecture and Key Concerns
 
@@ -143,24 +153,37 @@ A fixed-schema JSON handoff — not free text — so the Secondary Agent receive
 - RBAC scoped per agent; each gets only what it needs.
 - New failure patterns = extend Secondary's tool set, Primary untouched.
 
-#### Part 2 — Key Agent Concerns
+#### Part 2 — Key Agent Concerns (Context - Diagnostic Agent that can suggest fix)
 
-- **Blast radius / vetting** — Phase model: agents start read-only, gain write only after explicit promotion. RBAC scoped per ServiceAccount. PoC keeps both agents read-only; writes (e.g. pod restart) come in a later phase behind a DE approval gate.
-- **Security / access** — RBAC tied to the agent's ServiceAccount; least-privilege, scoped to inspected namespaces. DEs invoke via a defined interface (CLI or API endpoint).
-- **Cost** — Kagent is free/OSS. Cost = LLM endpoint (internal/private endpoint for air-gapped, no external spend) + engineering effort to build and maintain agents and MCP tool servers.
-- **Risk** — Read-only: LLM hallucination → wrong root cause misleads DE. Write phases: bad LLM decision mutates state. Mitigations: confidence-threshold gate on output, DE approval before any write, K8s audit logging of all agent API calls.
-- **Auditability** — OTEL trace per agent action; all Kube API calls logged under the agent SA. Gap: audit log shows the SA, not the triggering DE. Bridge by logging DE identity + OTEL trace ID per invocation → chain: DE → invocation → agent actions → API calls.
-- **Portability** — Runs on any Kubernetes; not OpenShift-specific. Redeployable on OKE with no architectural change; the only OCP-specific tool (`oc get scc`) is conditionally excluded off-OpenShift. Strongest candidate for the multi-cloud path.
+- **Blast radius / vetting** — Both agents run read-only. The ServiceAccount they run under has only read verbs (`get`, `list`, `watch`) bound to its Role — even if the LLM decided to mutate state, the Kube API would reject it
+
+- **Security / access** — The agent's access to the Kube API is governed by its ServiceAccount RBAC (above)
+
+- **Cost** — Three components:
+  - *Software:* kagent is OSS — no licensing cost.
+  - *Compute:* kagent's own controller + per-agent pods + MCP tool servers run on-cluster (CPU/memory requests in [`helm/sf-values.yaml`](helm/sf-values.yaml))
+  - *LLM inference:* assumed to be served from an internal/private endpoint, so no external API cost
+
+- **Risk** — for a read-only diagnostic agent, the failure modes are *misleading suggestions*, not destructive actions.
+  - *Wrong root cause:* the agent invents a plausible-but-wrong cause; an inexperienced DE believes it. **Mitigation:** structured JSON handoffs between Primary and Secondary force the model to cite the specific cluster evidence (log line, event, CRD field) it used. The DE verifies that evidence before acting on the fix.
+  - *Wrong suggested fix:* the agent identifies the correct root cause but recommends a fix that doesn't address it — or only addresses the symptom. **Mitigation:** the suggested fix must reference back to the cited root-cause finding; evaluated against the labelled incident set
+
+- **Auditability** — For a diagnostic agent the audit goal is **attribution + feedback** (which DE asked what, what did the agent suggest, was the suggestion followed, did it work) rather than blame-tracing a mutation. A K8s audit log entry shows only the agent's ServiceAccount, not the DE — so a per-DE trail requires stitching three logs:
+  1. **Invocation log** (DE-facing layer) — records the DE, the question asked, the agent's root cause + suggested fix, and a correlation ID.
+  2. **OTEL trace** (OpenTelemetry, emitted by kagent per agent step) — tagged with the same correlation ID.
+  3. **K8s audit log** — read-only Kube API calls under the agent SA.
+
+  *Proposed bridge:* inject the correlation ID into OTEL spans and K8s audit annotations so one ID joins all three trails. Whether kagent natively supports the audit-annotation injection is still to be confirmed.
+
+- **Portability** — Kagent runs on any conformant Kubernetes; not OpenShift-specific.
 
 ### Limitation & Concerns
 
-- Kagent is **alpha (v0.x)** — APIs and behaviour may change.
-- **No native approval gate** before writes (see blast radius).
-- **Split-log auditability** — identity correlation across kagent OTEL + K8s audit is an operational burden we must own.
-- Higher **resource and operational cost** than the CLI assistants.
+- Kagent is **alpha (v0.x)** — APIs and behaviour may change
+- **Diagnostic quality is the actual bottleneck** — even with perfect plumbing, the value of the system is bounded by how accurate and calibrated the LLM's diagnosis is 
+
 
 ## Open questions
 
-1. Should the PoC stay read-only (diagnosis only), or also cover write actions (e.g. pod restart)? 
-
+1. Does the scope of the work also include the POC of the agent being able to write to cluster ? or is the focus making the diagnostic agent (including suggest fix) right ? 
 

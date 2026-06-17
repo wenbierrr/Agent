@@ -12,7 +12,7 @@ No application code lives here — the repo contains epics, RFCs, and deployment
 
 - `epic.md` — top-level initiative scope, key tasks, and acceptance criteria
 - `rfc-ai-cluster-tooling.md` — the main RFC comparing K8sGPT, kubectl-ai, OpenShift Lightspeed, and kagent; includes the proposed Primary + Secondary agent architecture for kagent
-- `sf-values.yaml` — Helm override values for deploying kagent on a resource-constrained OpenShift single-node cluster (Groq Cloud as the LLM provider via OpenAI-compatible API)
+- `helm/sf-values.yaml` — Helm override values for deploying kagent on a resource-constrained OpenShift single-node cluster (Groq Cloud as the LLM provider via OpenAI-compatible API)
 - `template_rfc.md` — RFC template to follow when creating new RFCs
 
 # Key Decisions Recorded
@@ -39,7 +39,7 @@ Questions the epic requires the RFC to answer. Check off as each is addressed.
 
 **Key concerns (from epic)**
 - [x] Blast radius — what are the guardrails? Can agent execution be vetted?
-- [ ] Security — who can access/invoke the agent? (SA RBAC is covered; DE authentication is not)
+- [x] Security — who can access/invoke the agent? (SA RBAC covered in Part 2; DE authentication parked as Open Question 2, only needed if writes are added)
 - [x] Cost — what does running the agent require?
 - [x] Risk — what are the risks and mitigations?
 - [x] Auditability — who ran what? How is DE identity translated to agent actions?
