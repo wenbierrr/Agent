@@ -133,7 +133,14 @@ sequenceDiagram
     Note over DE: 14. Verify the cited evidence,<br/>then apply the fix manually<br/>(agents are read-only)
 ```
 
-Each pass through the reasoning loop, the Diagnostician needs at most one more thing — and gets it one of two ways: ask the **Collector** for a missing *cluster* fact (steps 7–10), or ask the **DE** for *human context* the cluster cannot provide (steps 11–12). Either answer feeds back into the next correlation (step 6). A simple failure (e.g. a missing ConfigMap visible in the first bundle) needs neither — it skips straight from the evidence bundle (step 5) to the report (step 13).
+**Zooming into the loop** — each pass, the Diagnostician needs at most one more thing, and gets it one of two ways:
+
+- **Missing a cluster fact?** → ask the **Collector** (steps 7–10)
+- **Missing human context the cluster can't provide?** → ask the **DE** (steps 11–12)
+
+Either answer feeds back into the next correlation (step 6).
+
+A simple failure — e.g. a missing ConfigMap already visible in the first evidence bundle — needs neither, and the orchastrctor can decide to skip straight from step 6 to the report (step 13).
 
 ### Architecture (Collector / Diagnostician)
 
