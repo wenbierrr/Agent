@@ -13,7 +13,7 @@
   - [Key concerns & guardrails](#key-concerns--guardrails)
   - [Limitations](#limitations)
 - [Open questions](#open-questions)
-- [Appendix A — kagent agent definitions](#appendix-a--kagent-agent-definitions)
+- [Appendix A — rough work for kagent agent definitions](#appendix-a--rough-work-for-kagent-agent-definitions)
 
 ## Motivation
 
@@ -82,6 +82,8 @@ Four candidates were surveyed. Only **kagent** has the concept of agentic AI, an
 
 ## Proposed approaches
 
+Of the four tools surveyed, two are not taken forward. **K8sGPT** is a scanner, not an assistant or an agent — it runs fixed analyzers and has the LLM explain their findings, so it cannot be driven conversationally to investigate a specific failure or reason past the symptom. **OpenShift Lightspeed** is vendor-locked to OpenShift; for an AI assistant, **kubectl-ai** (built by Google) gives the same value with no lock-in and runs on any Kubernetes, so it is preferred. That leaves **kubectl-ai** and **kagent** as the two candidates taken forward.
+
 Kagent is not committed as the production solution yet. It is alpha and unproven in the target environment, so an upfront commitment would be premature. The proposal is either a **full focus on kagent** OR a **sequential two-phase approach** within an **8-week** window -> capture immediate value with a mature tool first, then validate the kagent.
 
 For the latter :
@@ -96,7 +98,7 @@ For the latter :
 - The agents are **read-only** and produces two outputs for the DE: (a) a root-cause finding with cited cluster evidence, and (b) a suggested fix. It does **not** apply the fix.
 - How it works: [Kagent design → Architecture](#architecture-collector--diagnostician). How it's judged: [Success criteria](#success-criteria).
 
-## Kagent design
+## Kagent design (if Kagent is decided to be used)
 
 ### Workflow — how a DE uses it
 
@@ -144,8 +146,6 @@ A simple failure — e.g. a missing ConfigMap already visible in the first evide
 
 ### Architecture (Collector / Diagnostician)
 
-Two agents split along the axis that matters: **gathering evidence** vs. **reasoning over it**. The **Diagnostician** is the orchestrator the DE talks to; the **Collector** is its evidence-gathering tool. Critically, **only the Collector touches the cluster** — it holds every read tool and the single ServiceAccount. The Diagnostician has *no* cluster access at all; it gathers only by calling the Collector.
-
 - **Diagnostician (orchestrator)** = the agent the DE talks to. Reasons over evidence into a root cause and, from the root cause, a suggested fix. Holds no cluster tools; gathers only by calling the Collector.
 - **Collector (evidence tool)** = the only thing that touches the cluster: gathers evidence, determines blast radius, and answers the Diagnostician's requests. It reports what it *saw*, never what it *means*.
 
@@ -154,7 +154,7 @@ Two agents split along the axis that matters: **gathering evidence** vs. **reaso
 - The Diagnostician reasons over a bounded, provenance-tagged bundle instead of raw cluster output → higher accuracy and citable claims.
 
 **Collector (evidence tool)**
-- In: a request from the Diagnostician — the initial pod + namespace, or a specific follow-up.
+- In: a request from the Diagnostician — the initial failing pod + namespace, or a specific follow-up.
 - Tools (read-only, the *only* agent with them): `kubectl get pod`, `get events`, `logs`, `describe pod`, `get/describe secret/configmap`, `get node`, `get pvc`, `oc get scc`, Quay registry API, owner-reference + Service/Endpoint traversal, and the **Istio MCP** (`istioctl analyze`, proxy-config/Envoy dumps, sidecar + proxy-sync status) and **Argo MCP** (Argo CD app sync/health, drift, Argo Rollouts state) for runtime signals.
 - Does:
   - Reads the failure status straight from the pod object (`status.containerStatuses[].state.waiting.reason`) — a deterministic API field, no LLM classification needed.
@@ -226,14 +226,14 @@ A fixed-schema JSON object. It carries **raw evidence plus the `source` of each 
 | `evidence[].source` | Provenance on every item — the backbone of citable diagnosis; without it the Diagnostician cannot cite and the *Evidence* success criterion is unmeasurable |
 | `blastRadius.upstreamDependencies` | What the pod needs — frequently *where the root cause actually is* (the postgres it can't reach) |
 | `blastRadius.downstreamDependents` | What needs the pod — the *impact* surface |
-| `collectionMeta.completeness` / `gaps` | `completeness` = how much of the evidence coverage the Collector got (`complete` / `partial`), *not* diagnostic certainty. `gaps` = things it *tried but cannot* obtain (rotated/deleted/RBAC-denied), unfillable by anyone. Together they tell the Diagnostician what's missing, so it lowers *its own* confidence and reasons around the hole rather than re-requesting. Distinguishes "no logs" from "logs unavailable" (protects *Calibration*) |
+| `collectionMeta.completeness` / `gaps` | `completeness` = how much of the evidence coverage the Collector got (`complete` / `partial`), *not* diagnostic certainty. `gaps` = things it *tried but cannot* obtain (rotated/deleted/RBAC-denied), unfillable by anyone. Together they tell the Diagnostician what's missing, so it lowers *its own* confidence and reasons around the hole rather than re-requesting. Distinguishes "no logs" from "logs unavailable" (so the agent can flag uncertainty rather than guess) |
 
 **Diagnostician (orchestrator)**
-- In: the DE's report of a failing pod (pod + namespace). **No cluster tools** — it cannot touch the cluster at all; it gathers only by calling the Collector.
+- In: the DE's report of a failing pod (pod + namespace). **No cluster tools** — it gathers only by calling the Collector.
 - Does:
   - Calls the Collector for the initial evidence bundle, then correlates that evidence into a root cause and derives a fix *from* that root cause.
   - If reasoning reveals a newly-relevant fact missing from the bundle (e.g. after reading `connection refused`, it needs the upstream postgres pod's status), calls the **Collector** again for it. This is what solves multi-hop cases — the next hop only becomes relevant *after* correlation, so it can't be collected up front.
-  - If the missing piece is **human context the cluster cannot provide** (e.g. "was a deploy just made?", "is this spike expected?"), asks the **DE** a clarifying question rather than guessing — supports *Calibration*.
+  - If the missing piece is **human context the cluster cannot provide** (e.g. "was a deploy just made?", "is this spike expected?"), asks the **DE** a clarifying question rather than guessing.
   - For a fact flagged in `gaps` (unobtainable by anyone *and* not something the DE would know), does **not** re-request — lowers confidence and says so.
 - Out: the finding, returned directly to the DE — `summary`, `rootCause`, `blastRadius`, `suggestedFix`, `supportingEvidence` (each referencing the bundle's `source`s).
 
@@ -241,7 +241,7 @@ A fixed-schema JSON object. It carries **raw evidence plus the `source` of each 
 
 A short, plain-language report in five sections — no JSON:
 
-> **Summary:** The `checkout` pod in `payments` is crashlooping because the `db-credentials` secret it needs is missing, so it cannot authenticate to its database.
+> **Summary:** The `checkout` pod in `payments` is crashlooping because the `db-credentials` secret it needs is missing, so it cannot authenticate to its database **(Confidence level = x)**
 >
 > **Root cause:** The container exits with code 1 on every start (14 restarts in 6 min). It reads its database password from the `db-credentials` secret, which does not exist in the `payments` namespace — so its connection to postgres is refused.
 >
@@ -258,87 +258,53 @@ A short, plain-language report in five sections — no JSON:
 
 ### Success criteria
 
-What "good" means for the diagnostic agent (the rubric for judging kagent's agent):
+Four criteria define a good diagnosis. Every test case is scored on all four.
 
-| Criterion | Definition |
-|---|---|
-| *Accuracy* | Root cause matches a senior DE's call on a labelled set of past CrashLoopBackOff incidents. |
-| *Impact correlation* | Surfaces related resources and downstream affected services, not just the failing pod. |
-| *Evidence* | Every claim cites the specific log line, event, or CRD field that supports it. |
-| *Calibration* | When evidence is insufficient, the agent says so and asks for input rather than guessing . |
-| *Suggested fix* | Specific (exact command or YAML change), tied to the cited root cause — addresses the cause, not the symptom . |
-
-#### What the evaluation set looks like
-
-The evaluation set is the fixed benchmark these metrics are scored against: a collection of past, already-resolved pod failures, each paired with its known true root cause (the "answer key"). The agent is given only the `input`; the `label` is hidden from it and used only afterward, to grade it.
-
-One entry looks like:
-
-```jsonc
-{
-  "id": "clbo-2026-03-checkout",
-  "input": {                       // what the agent sees — the live evidence as it was at the time
-    "pod": "checkout-7d9f8c-abc12",
-    "namespace": "payments",
-    "capturedEvidence": "snapshot of the failing pod: status, events, logs, config refs, blast radius"
-  },
-  "label": {                       // the answer key — HIDDEN from the agent, used only to grade
-    "trueRootCause": "Secret 'db-credentials' was deleted; container exits 1, cannot authenticate to postgres",
-    "knownGoodFix": "recreate the 'db-credentials' secret in namespace 'payments'",
-    "confirmedBy": "senior DE, incident INC-4821"
-  }
-}
-```
-
-The full set is many such entries (for example, 30–50 CrashLoopBackOff cases). Scoring runs the agent over every `input`, compares its answer against the `label`, and the match rate becomes the *Accuracy* score. Because the set is fixed, the same cases are replayed after every configuration change — an apples-to-apples re-test. The entries come either from backfilled incident records (past resolved cases written down somewhere), or from a shadow-run period where the read-only agent runs alongside DEs and each incident is recorded with its confirmed cause as it is resolved.
-
-#### How the metrics drive improvement
-
-These metrics are **not just a report card — they are how the agent gets better.** The agent is *not* trained (the model is a provided endpoint, and it is stateless between incidents — talking to it teaches it nothing that persists). Instead, it is improved by **editing its configuration** — its system message, skills, or example incidents — and then **re-measuring** against these metrics. The metrics are the scoreboard that shows whether a change actually helped.
-
-The reasoning: a low metric is a *symptom*; reading the failed cases surfaces the *cause*; that points to the matching configuration lever. Each metric points at a different kind of problem:
-
-| If this metric is low… | …the likely problem is… | …the lever to pull is… |
+| Criterion | What a good answer does | How it is checked |
 |---|---|---|
-| **Accuracy** | reasoning skips a step or concludes too early | the Diagnostician's system message (its procedure), or add example incidents |
-| **Impact correlation** | it ignores the `blastRadius` it was given | the system message ("always check downstream dependents before concluding") |
-| **Evidence** | it asserts things without citing a `source` | the system message ("every claim must cite a `source`") |
-| **Calibration** | it guesses when evidence is thin | the system message ("if evidence is insufficient, say so rather than guess") |
-| **Suggested fix** | the fix is vague or only treats the symptom | the system message, or a skill holding a fix-writing playbook |
+| *Accuracy* | Names the real root cause | Compare its root cause to the case's known cause |
+| *Impact correlation* | Lists what else is affected, not just the failing pod | Check the affected services it names against what was actually affected |
+| *Evidence* | Backs every claim with a real log line, event, or field | Confirm each claim cites a source that exists in the evidence bundle |
+| *Suggested fix* | Proposes a fix that solves the cause, not the symptom | Compare its fix to the case's known-good fix |
 
-One important exception: a low score is not always the Diagnostician's fault. Sometimes it was wrong because the **Collector** never handed it the right evidence — so the fix is to improve the Collector's bundle, not the Diagnostician's prompt. Reading the failed transcript (not just the score) is what tells the two apart.
+**How scoring works:** Use past incidents that are already solved, so the correct answer is known. Feed the failing pod to the agent, read its answer, and score it against the above criterias.
 
-**The full loop:**
+#### The common failures (these become the test cases)
 
-```
-measure on the eval set  →  read the failures  →  find why it was wrong
-        ↑                                                    │
-        └──────  re-measure  ←  edit config  ←──────────────┘
-            (system message / skill / examples / Collector bundle)
-```
+`CrashLoopBackOff` is an umbrella over a handful of recurring causes. Each row below is a ready-made test case — a known failure, its usual root cause, the signal the Collector reads, and the known-good fix:
 
-1. **Measure** — run the agent over the evaluation set; the metrics give a score.
-2. **Read the failures** — look at the cases it got wrong and ask *why*.
-3. **Pick the lever** — the metric points to the kind of fix (table above).
-4. **Edit config** — change the system message, add a skill, add examples, or improve the Collector.
-5. **Re-measure** — re-run the eval set. Did the score go up? Keep the change if yes, revert if no.
+| Failure pattern | Typical root cause | Deterministic signal (what the Collector reads) | Known-good fix |
+|---|---|---|---|
+| Missing Secret / ConfigMap | A referenced Secret or ConfigMap does not exist in the namespace, so the container cannot start | `referencedConfig[].exists: false`; event `FailedMount` / `CreateContainerConfigError` | Recreate the missing Secret/ConfigMap |
+| OOMKilled | Memory limit is lower than the app needs; the kernel kills it | `lastTerminated.reason: OOMKilled`, exit code `137` | Raise the container's memory limit (or fix the leak) |
+| Liveness probe failure | A misconfigured/too-aggressive probe kills the container before it finishes starting | Event `Unhealthy: Liveness probe failed`; restarts with no app crash in logs | Relax probe timing, or add a `startupProbe` for slow starts |
+| Bad config / missing env / bad dependency URL | App reads invalid config or an unreachable dependency address and exits fatally on startup | Log line (e.g. `connection refused`, `invalid configuration`); exit code `1` | Correct the config value / env var / endpoint |
+| Bad image or command | Wrong image tag, or an entrypoint/command that does not exist | exit code `127`/`126`, or `ImagePullBackOff` / `ErrImagePull` | Fix the image tag or the container command |
+| Unhandled application exception | A bug in the app code throws on startup | Stack trace in the previous-container logs; exit code `1` | Application code fix (out of cluster-config scope — the agent surfaces it, the app team fixes it) |
 
-This is the **make it work → make it right → make it good** cycle in practice: every improvement is a config change *proven* by the metrics moving, never a guess.
+
+#### How the agent improves
+
+It is improved by editing its **system prompt, skills, or example incidents**, or by improving the **evidence the Collector gathers**. The loop is : run the test cases → read the ones it failed → work out why → make one change → re-run the same cases, and keep the change only if the score (of the above success criterias) went up
+
+> **Phasing:** 
+>
+> make-it-work -> scores the set and improves the prompt manually;
+>
+> make it right -> OTEL tracing to trace each agent's footprint, and [DeepEval](https://github.com/confident-ai/deepeval) are layered in later to automate scoring and unlock the full agentic metrics (tool correctness, step efficiency, plan adherence)
 
 ### Key concerns & guardrails
 
-- **Blast radius / vetting** — Only the Collector touches the cluster, and it runs read-only: its ServiceAccount has only read verbs (`get`, `list`, `watch`) bound to its Role — even if the LLM decided to mutate state, the Kube API would reject it. The Diagnostician has no cluster access at all, so it has no blast radius to govern.
+- **Blast radius / vetting** — Only the Collector touches the cluster, and it runs read-only: its ServiceAccount has only read verbs (`get`, `list`, `watch`) bound to its Role — even if the LLM decided to mutate state, the Kube API would reject it
 
-- **Security / access** — A single ServiceAccount (the Collector's) governs all cluster access; the Diagnostician reaches the cluster only indirectly, by asking the Collector. One SA to scope and audit.
+- **Security / access** — A single ServiceAccount (the Collector's) governs all cluster access
 
-- **Cost** — Three components:
+- **Cost** 
   - *Software:* kagent is OSS — no licensing cost.
   - *Compute:* kagent's own controller + per-agent pods + MCP tool servers run on-cluster (CPU/memory requests can be defined in a custom values.yaml)
   - *LLM inference:* assumed to be served from an internal/private endpoint, so no external API cost
 
-- **Risk** — for a read-only diagnostic agent, the failure modes are *misleading suggestions*, not destructive actions.
-  - *Wrong root cause:* the agent invents a plausible-but-wrong cause; an inexperienced DE believes it. <br/>**Mitigation:** the evidence bundle forces every claim back to a `source` (log line, event, CRD field) the Collector actually observed. The DE verifies that evidence before acting on the fix.
-  - *Wrong suggested fix:* the agent identifies the correct root cause but recommends a fix that doesn't address it — or only addresses the symptom. <br/>**Mitigation:** the suggested fix must reference back to the cited root-cause finding; evaluated against the labelled incident set
+- **Risk** — for a read-only diagnostic agent, the failure modes are *misleading suggestions*, not destructive actions
 
 - **Auditability** — not needed if it is a read only agent
 
@@ -347,17 +313,16 @@ This is the **make it work → make it right → make it good** cycle in practic
 ### Limitations
 
 - Kagent is **alpha (v0.x)** — APIs and behaviour may change
-- **Diagnostic quality is the actual bottleneck** — even with perfect plumbing, the value of the system is bounded by how accurate and calibrated the LLM's diagnosis is 
+- the value of the system is bounded by how accurate and calibrated the LLM's diagnosis is 
 
 ## Open questions
 
 1. Does the scope of the work also include the POC of the agent being able to write to cluster ? or is the focus making the diagnostic agent (including suggest fix) right ? 
 
-2. **Is a third "verifier" agent needed?** Should a separate agent fact-check the Diagnostician before its finding reaches the DE — confirming the root cause and suggested fix are genuinely supported by the cited evidence, rather than a plausible-sounding guess?
+2. **Is a third "verifier" agent needed?** Should a separate agent fact-check the Diagnostician before its finding reaches the DE — confirming the root cause and suggested fix are genuinely supported by the cited evidence ?
 
-## Appendix A — kagent agent definitions
+## Appendix A — rough work for kagent agent definitions
 
-Both agents run on the **same model** (`modelConfig`). What makes them different is **only the system message and the tools** they are given — not the model. This appendix gives an idea of how kagent `Agent` resources will look like, and first clears up the tools / skills / workflow vocabulary.
 
 ### A.1 Vocabulary: tool vs. skill vs. system message vs. workflow
 
@@ -365,12 +330,11 @@ These are four different things in kagent; they are easy to conflate.
 
 | Concept | What it is in kagent | The "…" | In this design |
 |---|---|---|---|
-| **Tool** | A function the agent can call to act on its environment. Defined under `spec.declarative.tools` as either `type: McpServer` (named tools from an MCP server) or `type: Agent` (another agent, called via A2A). | the *what it can call* | Collector: read-only `k8s_*` / `istio_*` / `argo_rollouts_*`. Diagnostician: just the Collector agent. |
+| **Tool** | A function the agent can call to act on its environment. Defined under `spec.declarative.tools` as either `type: McpServer` (named tools from an MCP server) or `type: Agent` (another agent, called via A2A). | the *what it can call* | Collector: read-only `k8s_*` / `istio_*` / `argo_rollouts_*`. <br/> Diagnostician: just the Collector agent. |
 | **System message** | The agent's role and standing instructions, applied to *every* interaction. `spec.declarative.systemMessage` (supports Go templates / ConfigMap includes). | the *who it is* | The single thing that differentiates the two agents. |
 | **Skill** | Packaged know-how that guides *how/when* to use tools toward a goal — **not** a single function. kagent has **A2A skills** (inline capability metadata advertised on the agent's A2A card) and **container-based skills** (a `SKILL.md` with YAML frontmatter + scripts, packaged as a container image and referenced via `spec.declarative.skills.refs`). | the *playbook / know-how* | Optional: a `crashloopbackoff-triage` skill on the Diagnostician (a make-it-right packaging of the procedure that otherwise lives in its system message). |
 | **Workflow** | Not a single resource — the **multi-agent composition** where agents discover and invoke each other via A2A delegation. | the *wiring between agents* | The Collector ⇄ Diagnostician loop shown in [Workflow](#workflow--how-a-de-uses-it). |
 
-**The short answer to "skill vs. workflow":** a *skill* is one agent's packaged know-how; a *workflow* is how multiple agents are wired together. They sit at different levels — an agent *has* skills; agents *compose into* a workflow.
 
 ### A.2 Collector agent
 
@@ -421,7 +385,6 @@ spec:
             - istio_proxy_config
             - istio_analyze_cluster_configuration
             - argo_rollouts_list
-    # No skills needed for make-it-work — the procedure lives in the system message.
 ```
 
 
@@ -473,15 +436,10 @@ spec:
       DE is shown `summary`, `rootCause`, `blastRadius`, `suggestedFix`, and
       `supportingEvidence` as a plain-language report.
     tools:
-      - type: Agent              # the ONLY tool — the Collector, reached over A2A
+      - type: Agent              
         agent:
           name: collector
-    # (make-it-right) by packaging the triage playbook as a reusable skill
-    # skills:
-    #   refs:
-    #     - <registry>/crashloopbackoff-triage:latest
 ```
 
-Because the Diagnostician's *only* tool is the Collector agent, it cannot touch the cluster except by asking — which is exactly the guardrail and the gather-vs-reason split, expressed in the spec itself.
 
 **Sources:** [Agents concept](https://kagent.dev/docs/kagent/concepts/agents) · [Tools concept](https://kagent.dev/docs/kagent/concepts/tools) · [Add skills to agents](https://kagent.dev/docs/kagent/examples/skills) · [Tools ecosystem](https://kagent.dev/docs/kagent/resources/tools-ecosystem) · [A2A agents](https://kagent.dev/docs/kagent/examples/a2a-agents)
