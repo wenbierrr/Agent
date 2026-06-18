@@ -34,6 +34,7 @@ The goal is a solution that troubleshoots cluster errors which address the above
 **In scope:** 
 
 - comparison of K8sGPT, kubectl-ai, OpenShift Lightspeed, and kagent
+- kagent design (if this tool is decided to be used)
 - evaluation of kagent across blast radius, security, cost, risk, auditability, and portability
 
 **Out of scope:**
