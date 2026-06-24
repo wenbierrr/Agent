@@ -7,10 +7,10 @@
 2. [Tool landscape](#tool-landscape)
    - [Day 0 — selection & design](#day-0--selection--design)
    - [Day 1 — install & onboard](#day-1--install--onboard)
-   - [Day 2 — operate & troubleshoot](#day-2--operate--troubleshoot-the-core-use-case)
+   - [Day 2 — operation & ease of upgrade](#day-2--operation--ease-of-upgrade)
    - [Features & UX](#features--ux)
 3. [Proposed approaches](#proposed-approaches)
-4. [Kagent design](kagent/kagent.md)
+4. [Kagent design](#kagent-design)
 
 
 
@@ -32,7 +32,7 @@ The goal is a solution that tackles these three problems when troubleshooting cl
 
 **In scope:** 
 
-- comparison of K8sGPT, kubectl-ai, OpenShift Lightspeed, and kagent
+- comparison of K8sGPT, kubectl-ai, and kagent
 
 **Out of scope:**
 - Hosting of the LLM (an inference endpoint is assumed to be provided).
@@ -40,42 +40,45 @@ The goal is a solution that tackles these three problems when troubleshooting cl
 
 ## Tool landscape
 
-The four candidates are scored against a fixed set of **evaluation boxes** spanning the operational lifecycle — **Day 0** (selection & design), **Day 1** (install & onboard), and **Day 2** (operate & troubleshoot, the core use case). The first box is a hard gate: **any tool that fails a Trivy scan is dropped, regardless of how it scores everywhere else.**
+The three candidates are scored against a fixed set of **evaluation boxes** spanning the operational lifecycle — **Day 0** (selection & design), **Day 1** (install & onboard), **Day 2** (operation & ease of upgrade), as well as other considerations like UX.
 
 ### Day 0 — selection & design
 
-| Evaluation box | K8sGPT | Kubectl-ai | OpenShift Lightspeed | Kagent |
-|---|---|---|---|---|
-| **Security — Trivy scan (image/binary) — GATE** | _Pending scan_ — OSS CLI binary, single artifact | _Pending scan_ — OSS CLI binary, single artifact | _Pending scan_ — Red Hat vendor-controlled images | _Pending scan_ — **largest surface**: controller + per-agent pods + MCP server images |
-| **Cost & licensing** | OSS, free | OSS, free | Red Hat subscription (paid) | OSS, free; but on-cluster compute (controller + agent pods + MCP servers) |
-| **Portability (lock-in)** | Any Kubernetes | Any Kubernetes | **OpenShift-only** | Any conformant Kubernetes |
-| **Maturity** | Established OSS (CNCF); operator has few stars | Newer; Google-backed | GA Red Hat product | **Alpha (v0.x, 2025)** — least proven |
+| Evaluation box | K8sGPT | Kubectl-ai | Kagent |
+|---|---|---|---|
+| **Security — Trivy scan (image/binary) — as of 22/6/26** | 2 high that is "affected" status, but can seek waiver ([CVE-2026-41567](https://nvd.nist.gov/vuln/detail/CVE-2026-41567) & [CVE-2026-42306](https://nvd.nist.gov/vuln/detail/CVE-2026-42306)) | 1 Crit that is "affected" status, but can seek waiver ([CVE-2025-63389](https://nvd.nist.gov/vuln/detail/CVE-2025-63389)) | No high, No Crit (all high/crit are of status: fixed) |
+| **Why it was built** | Encodes SRE checks as code | Enables talking to k8 as simple as speaking english | Solo.io framework to bring agentic AI workflow to k8 |
+| **Cost & licensing** | OSS, free | OSS, free | OSS, free; but require on-cluster compute resource |
+| **Portability (lock-in)** | Any Kubernetes | Any Kubernetes | Any conformant Kubernetes |
+| **Maturity** | Established OSS (CNCF); operator has few stars | Newer; Google-backed | **Alpha (v0.x, 2025)** — least proven |
+| **Additional chore to fit the use case** | — | — | wire 2 custom Agents (Collector + Diagnostician) with their tools/RBAC, then add to helm chart |
+| **What we lose** | Bounded by its fixed analyzers — surfaces only what is down / have error, and stops at the symptom → no root-cause correlation | No investigation loop — request–response only, the DE drives every step; and inconsistent — depth rides on prompting, no deterministic grounding | Alpha and unproven (API churn, risk); and heaviest to install/operate with the largest CVE surface (even though the Trivy scan passes for now) |
 
 ### Day 1 — install & onboard
 
-| Evaluation box | K8sGPT | Kubectl-ai | OpenShift Lightspeed | Kagent |
-|---|---|---|---|---|
-| **Deployment model** | CLI binary (optional in-cluster operator) | CLI binary | Bundled with OCP (operator) | In-cluster via Helm — operator + CRDs + MCP servers (heaviest) |
-| **Access & identity** | Runs under the user's kubeconfig | Runs under the user's `oc`/kubeconfig identity | Tied to OCP user identity | Per-agent ServiceAccount with RBAC scoping |
+| Evaluation box | K8sGPT | Kubectl-ai | Kagent |
+|---|---|---|---|
+| **Deployment model** | Go binary | Go binary | In-cluster via [Helm](https://github.com/kagent-dev/kagent/tree/main/helm) — **heaviest**: full platform (controller + tool server + Postgres (to persist conversation history) + 2 custom Agents (collector & orchestrator)) |
+| **Access & identity** | perform actions using kubeconfig identity | perform actions using kubeconfig identity | Per-agent ServiceAccount with RBAC scoping |
 
-### Day 2 — operate & troubleshoot (the core use case)
+### Day 2 — operation & ease of upgrade
 
-| Evaluation box | K8sGPT | Kubectl-ai | OpenShift Lightspeed | Kagent |
-|---|---|---|---|---|
-| **Troubleshooting mode** | Scanner — fixed analyzers → LLM explains | Assistant — NL → kubectl, session context | Assistant — console chat | Agent — multi-step reasoning, A2A orchestration |
-| **Data-source reach** | Kube API | Kube API via kubectl | OCP console + API | Kube API **+ Istio & Argo MCP** (Envoy proxy sync, mesh config validation, GitOps drift, rollout history) |
-| **Action capability & blast radius** | Nil — read-only | Generates & executes write `kubectl` (on approval) | Nil — read-only, can't act | Configurable write; RBAC-scoped per agent |
-| **Root cause + evidence** | Shallow — one-sentence explanation of an analyzer finding | Investigates conversationally; traces to a cause; cites via commands | Conversational explanation | Agentic correlation; evidence bundle with per-item provenance (designed) |
-| **Auditability / observability** | Read calls only; no question log | K8s audit log under the `oc` user | Tied to OCP identity; questions not logged | Built-in OTEL tracing of every agent action |
+| Evaluation box | K8sGPT | Kubectl-ai | Kagent |
+|---|---|---|---|
+| **How to use to troubleshoot cluster** | Scanner-like —> fixed analyzers scan cluster resources we specify (can be namespace-scoped) → send findings to LLM for explanation (using the flag --explain) | Assistant/Agent-like —> Converts Natural Lang to kubectl commands (similar to how we talk to a chatbot) | Agentic Workflow-like —> multi-step reasoning, A2A orchestration |
+| **Data-source reach** | Kube API | Kube API via kubectl | Kube API **+ Istio & Argo MCP** — **Istio proxy-sync status** & **Argo app sync/health** |
+| **Action capability & blast radius** | Nil — read-only | Generates & executes write `kubectl` (on approval); as additional guardrail - can create a read only svc acc for it | Configurable write; RBAC-scoped per agent |
+| **Interaction / decision trail** | None — one-shot CLI, nothing persisted | Ephemeral terminal session — not persisted by default | **Persisted**: Postgres (which comes together with the helm chart) for chat history & can also configure OTEL to trace agent actions |
+| **Ease of upgrade** | Replace the single binary — trivial | Replace the single binary — trivial | `helm upgrade` multi-components (controller + tool server + CRDs) |
 
 ### Features & UX
 
-| Evaluation box | K8sGPT | Kubectl-ai | OpenShift Lightspeed | Kagent |
-|---|---|---|---|---|
-| **Chat (multi-turn)** | No — one-shot scan + explain, no dialogue | Yes — interactive session, keeps context | Yes — conversational console chat | Yes — chat UI with the agent |
-| **Interface / UX** | CLI | CLI (interactive terminal) | Embedded in the OCP web console | Web UI (+ CLI/API) |
-| **Extensibility** | Custom analyzers | Configurable tools | None — closed product | Custom agents + MCP tools (Istio, Argo, …) |
-| **LLM endpoint flexibility** | Bring-your-own backend (OpenAI, local, …) | Bring-your-own provider & model | Configurable provider (supported list) | Any OpenAI-compatible endpoint |
+| Evaluation box | K8sGPT | Kubectl-ai | Kagent |
+|---|---|---|---|
+| **Chat (multi-turn)** | No — one-shot scan + explain, no dialogue | Yes — interactive session, keeps context | Yes — chat UI with the agent |
+| **Interface / UX** | CLI | CLI (interactive terminal) | Web UI |
+| **Extensibility** | Custom analyzers | Configurable custom tools (register new commands the tool can run) | Custom agents + MCP tools (Istio, Argo, …) |
+| **LLM endpoint flexibility** | can point to custom endpoint | can point to custom endpoint | can point to custom endpoint |
 
 1. **[K8sGPT](https://github.com/k8sgpt-ai/k8sgpt)**
 
@@ -97,30 +100,13 @@ The four candidates are scored against a fixed set of **evaluation boxes** spann
 
    *kubectl-ai traces the `ImagePullBackOff` back to the bad image tag in the Deployment spec, proposes fix commands, asks for approval, then executes if given permission*
 
-3. **OpenShift Lightspeed** — a read-only chat assistant embedded in the OCP console. Convenient and tied to OCP identity, but OpenShift-only & can't act
-
-4. **[Kagent](https://github.com/kagent-dev/kagent)** — the only true *agent*: it can take actions, not just suggest them.
+3. **[Kagent](https://github.com/kagent-dev/kagent)** — the only true *agent*: it can take actions, not just suggest them.
 
    > **Note:** Kagent is a new project (created in 2025) and still alpha (v0.x). Further experimentation is needed to confirm it is fully functional and production-ready for the intended use cases.
 
 ## Proposed approaches
 
-Of the four tools surveyed, two are not taken forward. **K8sGPT** is a scanner, not an assistant or an agent — it runs fixed analyzers and has the LLM explain their findings, so it cannot be driven conversationally to investigate a specific failure or reason past the symptom. **OpenShift Lightspeed** is vendor-locked to OpenShift; for an AI assistant, **kubectl-ai** (built by Google) gives the same value with no lock-in and runs on any Kubernetes, so it is preferred. That leaves **kubectl-ai** and **kagent** as the two candidates taken forward.
-
-Kagent is not committed as the production solution yet. It is alpha and unproven in the target environment, so an upfront commitment would be premature. The proposal is either a **full focus on kagent** OR a **sequential two-phase approach** within an **8-week** window -> capture immediate value with a mature tool first, then validate the kagent.
-
-For the latter :
-
-**Phase 1 — kubectl-ai for immediate value (~ 1-2 weeks)**
-- Test and deploy [kubectl-ai](https://github.com/GoogleCloudPlatform/kubectl-ai) in the environment.
-- Provides DEs a working natural-language-to-kubectl assistant immediately, with no new platform overhead
-
-
-**Phase 2 — kagent diagnostic PoC (~ 6-7 weeks)**
-- Build a two-agent pair — a **Diagnostician** (orchestrator the DE talks to) and a **Collector** (its evidence-gathering tool)
-- The agents are **read-only** and produces two outputs for the DE: (a) a root-cause finding with cited cluster evidence, and (b) a suggested fix. It does **not** apply the fix.
-- How it works and how it's judged: see the full design in [`kagent/kagent.md`](kagent/kagent.md) — [Architecture](kagent/kagent.md#architecture-collector--diagnostician), [Success criteria](kagent/kagent.md#success-criteria).
-
+To be written and decided later,
 
 
 # Kagent design

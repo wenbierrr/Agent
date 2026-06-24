@@ -84,25 +84,27 @@ querydoc:
 # ==============================================================================
 
 istio-agent:
-  enabled: true
-  resources:
-    requests:
-      cpu: 20m
-      memory: 128Mi
-    limits:
-      memory: 256Mi
+  enabled: false
+  # enabled: true
+  # resources:
+  #   requests:
+  #     cpu: 20m
+  #     memory: 128Mi
+  #   limits:
+  #     memory: 256Mi
 
 kgateway-agent:
   enabled: false
 
 argo-rollouts-agent:
-  enabled: true
-  resources:
-    requests:
-      cpu: 20m
-      memory: 128Mi
-    limits:
-      memory: 256Mi
+  enabled: false
+  # enabled: true
+  # resources:
+  #   requests:
+  #     cpu: 20m
+  #     memory: 128Mi
+  #   limits:
+  #     memory: 256Mi
 
 cilium-policy-agent:
   enabled: false
@@ -120,10 +122,11 @@ promql-agent:
   enabled: false
 
 helm-agent:
-  enabled: true
-  resources:
-    requests:
-      cpu: 20m
-      memory: 128Mi
-    limits:
-      memory: 256Mi
+  enabled: false
+  # enabled: true
+  # resources:
+  #   requests:
+  #     cpu: 20m
+  #     memory: 128Mi
+  #   limits:
+  #     memory: 256Mi

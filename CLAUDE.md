@@ -15,13 +15,11 @@ No application code lives here — the repo contains epics, RFCs, and deployment
 # Repository Structure
 
 - `epic.md` — top-level initiative scope, key tasks, and acceptance criteria
-- `rfc-ai-cluster-tooling.md` — the main RFC comparing K8sGPT, kubectl-ai, OpenShift Lightspeed, and kagent. Tool-agnostic: the kagent-specific design is **not** inlined here
-- `kagent/kagent.md` — the kagent candidate's full design (Collector + Diagnostician architecture, workflow, success criteria, guardrails, rough agent definitions). Kept separate so the RFC stays an open comparison
-- `kagent/CLAUDE.md` — guidance for kagent-specific work (only relevant when the task is about kagent)
+- `rfc-ai-cluster-tooling.md` — the main RFC comparing K8sGPT, kubectl-ai, and kagent (OpenShift Lightspeed is excluded upfront — vendor-locked to OpenShift). The kagent-specific design is inlined as a self-contained **Kagent design** section at the end, kept out of the comparison sections so the comparison stays open
 - `helm/sf-values.yaml` — Helm override values for deploying kagent on a resource-constrained OpenShift single-node cluster (Groq Cloud as the LLM provider via OpenAI-compatible API)
 - `template_rfc.md` — RFC template to follow when creating new RFCs
 
-> **Kagent is one candidate, not the answer.** Do not pull kagent-specific detail into this file or the RFC — it lives under `kagent/`. See [`kagent/CLAUDE.md`](kagent/CLAUDE.md) only when the task is explicitly about kagent.
+> **Kagent is one candidate, not the answer.** The kagent design lives in the RFC's *Kagent design* section; kagent-specific working guidance lives in the `# KAgent` section at the bottom of this file. Keep both out of the RFC's comparison sections so the comparison stays open.
 
 # Problem Statement
 
@@ -39,12 +37,14 @@ The RFC must read as **one funnel that ends in a decision** — the supervisor (
 
 1. **Motivation** — the problem (status ambiguity + the three DE problems). Lead here.
 2. **Scope** — in / out.
-3. **Tool landscape** — the four-tool comparison. State each tool's capability (e.g. "only kagent can act") once, here.
-4. **Proposed approaches** — the plan (full-focus-on-kagent OR two-phase). High-level; link out to the kagent design, don't inline it.
+3. **Tool landscape** — the three-tool comparison (K8sGPT, kubectl-ai, kagent). State each tool's capability (e.g. "only kagent can act") once, here.
+4. **Proposed approaches** — the plan (full-focus-on-kagent OR two-phase). High-level; the detailed kagent design is a separate section later in the RFC.
 5. **Open questions** — what's still open.
 
+The **Kagent design** section follows the funnel as a self-contained appendix — design notes for one candidate, not part of the comparison.
+
 Flow rules:
-- **Keep kagent-specific content OUT of the RFC** — it lives in `kagent/kagent.md`. The RFC stays a tool-agnostic comparison; link out to the kagent design rather than inlining it.
+- **Keep the comparison sections (Motivation → Open questions) tool-agnostic** — the kagent design is confined to the trailing *Kagent design* section. The comparison must stay open; never argue kagent into the Tool landscape or Proposed approaches.
 
 # Rules
 
@@ -62,3 +62,19 @@ Flow rules:
 - When writing the RFC, MAKE SURE information are mentioned not more than once. DO NOT REPEAT INFORMATION.
 - Honour the phasing: make it work → make it right → make it good
 - When writing the RFC, don't be long winded. Go straight to the point and be concise about whatever you write.
+
+
+
+# KAgent (read this only when i am talking about kagent)
+
+Guidance for working on the **kagent candidate** specifically. Only relevant when the task is about kagent.
+
+> **Framing:** these are design notes for **one candidate only — the kagent agent approach**. They describe how that tool *would* work *if chosen*; they are **not** a decision that an agent is the answer. The tool comparison in [`rfc-ai-cluster-tooling.md`](rfc-ai-cluster-tooling.md), not this design, drives the recommendation. Keep the kagent design confined to the RFC's *Kagent design* section — never let it leak into the comparison sections, so the comparison stays open.
+
+# Key design decisions for kagent
+
+  - **Diagnostician (orchestrator):** the agent the DE talks to. *No cluster access at all* — pure reasoning. Calls the Collector for the initial bundle, correlates evidence → root cause → suggested fix, calls the Collector again for follow-ups. A genuine `gap` (data unobtainable by anyone) → it lowers confidence, never re-requests. Returns the finding directly to the DE.
+  - **Collector (evidence tool):** the ONLY agent with cluster read tools + a ServiceAccount. On a request from the Diagnostician, gathers the evidence bundle + blast radius (upstream dependencies + downstream dependents) and returns it. **Never concludes.**
+  - **Evidence bundle (Collector → Diagnostician):** fixed-schema JSON carrying *evidence + a `source` on every item* (provenance = citable diagnosis), never conclusions. NOT versioned (parked).
+  - **Read-only:** the agent suggests; the DE verifies the cited evidence and applies the fix.
+- **Phasing philosophy — make it work → make it right → make it good.** Currently in **make-it-work**.
