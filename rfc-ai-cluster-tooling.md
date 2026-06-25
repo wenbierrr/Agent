@@ -106,7 +106,100 @@ The three candidates are scored against a fixed set of **evaluation boxes** span
 
 ## Proposed approaches
 
-To be written and decided later,
+Three approaches address the motivation, escalating in capability and footprint — a single-binary scan, a grounded conversational assistant, then a full autonomous agent. Each is described by its DE workflow (DE↔tool and tool↔tool), its use cases, and the **diagnostic quality** it can reach.
+
+### Approach 1 — k8sgpt + LLM (`--explain`)
+
+The simplest option: the DE runs the k8sgpt binary against a namespace or the whole cluster. Its fixed analyzers scan resources read-only and flag what is broken, and the `--explain` flag sends each finding to the internal LLM endpoint for a plain-English explanation. No MCP, no agents — one binary plus an LLM endpoint, one-shot.
+
+```mermaid
+sequenceDiagram
+    participant DE as DE
+    participant K8 as k8sgpt (CLI binary)
+    participant C as Cluster (Kube API)
+    participant LLM as LLM (internal endpoint)
+    DE->>K8: 1. k8sgpt analyze --explain -n <namespace>
+    K8->>C: 2. Fixed analyzers scan resources (read-only)
+    C-->>K8: 3. Findings (what is broken)
+    K8->>LLM: 4. Send each finding for explanation (--explain)
+    LLM-->>K8: 5. Plain-English explanation
+    K8-->>DE: 6. Findings + a one-line explanation each
+```
+
+- **Use cases:** fast first-pass health scan; surfacing known failure patterns; zero in-cluster infrastructure (a single binary + the endpoint); a baseline before reaching for heavier tooling.
+- **Diagnostic quality:** *Low* — deterministic detection of known patterns with a plain-English explanation, but one-shot and stops at the symptom (no correlation, no follow-up loop).
+- **Drawback:** bounded by the fixed analyzers (only catches what they are coded for); no multi-hop correlation and no dialogue — the explanation is a single sentence per finding.
+
+### Approach 2 — kubectl-ai (MCP client) + k8sgpt (MCP server)
+
+kubectl-ai is the conversational front-end the DE talks to; it connects as an **MCP client** to k8sgpt running in **MCP-server mode** (`k8sgpt serve --mcp`), so k8sgpt's deterministic analyzers, resource queries, logs and events become tools kubectl-ai can call. This is so that if kubectl-ai want to find out what is wrong with a namespace/cluster, it is able to call k8sgpt to pinpoint the error as k8gpt was made to filter out the noise and highlight what is wrong efficiently (without LLM).
+
+```mermaid
+sequenceDiagram
+    participant DE as DE
+    participant KA as kubectl-ai (MCP client + LLM)
+    participant K8 as k8sgpt (MCP server)
+    participant C as Cluster (Kube API)
+    DE->>KA: 1. Ask about a failing pod (natural language)
+    KA->>K8: 2. Call analyzer tools (analyze, events, logs)
+    K8->>C: 3. Read resources (read-only)
+    C-->>K8: 4. Findings
+    K8-->>KA: 5. Deterministic analyzer findings
+    KA->>KA: 6. Reason over findings (LLM)
+    KA-->>DE: 7. Explanation + suggested next step
+    DE->>KA: 8. Follow-up (the DE drives the loop)
+```
+
+- **Use cases:** conversational triage where the DE wants to drive but with a deterministic factual floor; teams comfortable with a chat in CLI workflow; a lighter footprint than a full agent platform.
+- **Diagnostic quality:** *Medium-High* — analyzer-grounded so claims are factual, but the investigation loop is **DE-driven** (depth still depends on prompting)
+- **Drawback (flagged):** kubectl-ai's container image / Dockerfile is **not actively maintained.** Writes are possible so we need to make kubectl-ai run under a read-only ServiceAccount.
+
+### Approach 3 — kagent (Collector + Diagnostician)
+
+A full agentic platform: the DE talks to the **Diagnostician**, which autonomously drives a read-only **Collector** through a multi-hop investigation loop and returns a root cause + evidence + suggested fix. Detailed design in the [Kagent design](#kagent-design) section — not repeated here.
+
+```mermaid
+sequenceDiagram
+    participant DE as DE
+    participant D as Diagnostician (kagent)
+    participant Col as Collector (kagent, read-only)
+    participant C as Cluster
+    DE->>D: 1. Report failing pod
+    D->>Col: 2. Request evidence
+    Col->>C: 3. Read status/events/logs/blast radius
+    C-->>Col: 4. Data
+    Col-->>D: 5. Evidence bundle (with provenance)
+    loop autonomous until confident
+        D->>Col: 6. Follow-up (multi-hop)
+        Col-->>D: 7. More evidence
+    end
+    D-->>DE: 8. Root cause + evidence + suggested fix
+```
+
+- **Use cases:** consistent senior-level diagnosis regardless of who is on shift (knowledge levelling); autonomous multi-hop correlation + blast radius; when Istio/Argo signals, a persisted decision trail, and a read-only-by-design ServiceAccount matter.
+- **Diagnostic quality:** *High* — autonomous correlation, evidence with per-item provenance; bounded by LLM calibration and by the platform being alpha.
+- **Drawback:** heaviest to install/operate, largest CVE surface, alpha (API churn), and must author 2 custom agents.
+
+### What each approach gains / loses
+
+Approaches across the top; factors that matter for putting AI-driven troubleshooting into an air-gapped cluster (against the motivation) down the side.
+
+| Factor | A1: k8sgpt + LLM | A2: kubectl-ai + k8sgpt | A3: kagent |
+|---|---|---|---|
+| **Diagnostic depth** (root cause + correlation) | Low — detect + explain, stops at symptom | Medium — grounded but DE-driven | **High** — autonomous multi-hop |
+| **Consistency / DE-skill independence** | Med — push-button & consistent, but shallow | Low–Med — depth rides on prompting | High — autonomous |
+| **Data-source reach** | Kube API (analyzers) | Kube API (analyzers via MCP) | Kube + Istio + Argo |
+| **Blast-radius safety** (read-only) | Yes — read-only by nature | Yes — needs RBAC scoping | Yes — read-only SA by design |
+| **Auditability / persistence** | Low — one-shot, nothing persisted | Low — ephemeral (must add) | High — Postgres + OTEL |
+| **Ease of installation** (air-gapped images) | Easiest — single binary + endpoint | Med — 2 components + self-built image | Heavy — full platform |
+| **Ease of upgrade** | Trivial — swap binary | Easy — swap images | Helm multi-component + CRDs |
+| **Security / CVE surface** | Smallest | Small–Med | Largest |
+| **Supply-chain / maintenance risk** | Low — single mature OSS binary | **High — kubectl-ai image unmaintained** | Med–High — kagent alpha (API churn) |
+| **Build effort** | None — run the binary | Low–Med — wire MCP + self-build image | Med — author 2 agents |
+
+**The core trade-off:** A1 is the lightest and fastest with the smallest surface, but it is shallow — it detects and explains known patterns and stops at the symptom. A2 puts a deterministic factual floor under a conversational loop, but the DE still drives it and the unmaintained kubectl-ai image is a supply-chain risk. A3 delivers autonomous, consistent, auditable diagnosis at the cost of the heaviest air-gapped footprint, the largest CVE surface, and alpha maturity. The choice rests on how the lead platform engineer weighs *diagnostic quality and consistency* against *air-gapped footprint, security surface, and maintenance risk* — the decision this RFC exists to support.
+
+**Sources:** [k8sgpt MCP server](https://github.com/k8sgpt-ai/k8sgpt/blob/main/MCP.md) · [k8sgpt MCP docs](https://k8sgpt.ai/docs/reference/mcp) · [kubectl-ai (custom tools + MCP)](https://github.com/GoogleCloudPlatform/kubectl-ai)
 
 
 # Kagent design
